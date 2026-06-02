@@ -3,11 +3,16 @@
 package browser
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
@@ -64,6 +69,10 @@ func Launch(opts Options) (*Browser, error) {
 	if err := os.MkdirAll(profile, 0o755); err != nil {
 		return nil, fmt.Errorf("create profile dir: %w", err)
 	}
+
+	// Self-heal: a previous run that didn't shut down cleanly can leave a Chrome
+	// holding the profile (a stale SingletonLock), which aborts new launches.
+	reapStaleProfile(profile)
 
 	l := launcher.New().
 		UserDataDir(profile).
@@ -193,6 +202,49 @@ func cookiesToParams(cs []*proto.NetworkCookie) []*proto.NetworkCookieParam {
 
 // DefaultStateFile returns the cookie state file path for the default profile.
 func DefaultStateFile() string { return DefaultProfileDir() + ".cookies.json" }
+
+// reapStaleProfile kills a leftover Chrome that still holds our app-owned
+// profile (from a prior run that didn't exit cleanly) and removes the Singleton
+// lock files, so a fresh launch can proceed. Safe because the profile is
+// dedicated to this tool: any Chrome bound to it is one of ours.
+func reapStaleProfile(profile string) {
+	if pid := singletonOwnerPID(profile); pid > 0 && chromeOwnsProfile(pid, profile) {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+			time.Sleep(250 * time.Millisecond) // let children exit and release the socket
+		}
+	}
+	for _, name := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
+		_ = os.Remove(filepath.Join(profile, name))
+	}
+}
+
+// singletonOwnerPID parses the PID from the profile's SingletonLock symlink
+// (target form "<hostname>-<pid>"). Returns 0 if absent/unreadable.
+func singletonOwnerPID(profile string) int {
+	target, err := os.Readlink(filepath.Join(profile, "SingletonLock"))
+	if err != nil {
+		return 0
+	}
+	i := strings.LastIndex(target, "-")
+	if i < 0 {
+		return 0
+	}
+	pid, _ := strconv.Atoi(target[i+1:])
+	return pid
+}
+
+// chromeOwnsProfile reports whether pid is a live Chrome process bound to
+// profile. On Linux it verifies via /proc to avoid killing a recycled PID; on
+// other platforms it trusts the lock (best effort).
+func chromeOwnsProfile(pid int, profile string) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return runtime.GOOS != "linux" // dead on Linux; unverifiable elsewhere
+	}
+	cmd := string(bytes.ReplaceAll(data, []byte{0}, []byte{' '}))
+	return strings.Contains(cmd, "chrome") && strings.Contains(cmd, profile)
+}
 
 // statusJS classifies the page state from within the page.
 const statusJS = `() => {

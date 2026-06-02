@@ -49,3 +49,24 @@ func TestCookieStateRoundTrip(t *testing.T) {
 	}
 	t.Fatalf("session cookie not restored across runs (got %d cookies)", len(cs))
 }
+
+// TestLaunchReapsStaleProfile simulates an orphaned Chrome (a launch left
+// running, holding the SingletonLock) and verifies a second Launch on the same
+// profile self-heals instead of failing with a lock error.
+func TestLaunchReapsStaleProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "p")
+
+	orphan, err := Launch(Options{Headless: true, ProfileDir: profile})
+	if err != nil {
+		t.Skipf("cannot launch chrome: %v", err)
+	}
+	// Intentionally do NOT close orphan; it still holds the profile lock.
+
+	b, err := Launch(Options{Headless: true, ProfileDir: profile})
+	if err != nil {
+		orphan.Close()
+		t.Fatalf("second launch did not self-heal stale profile lock: %v", err)
+	}
+	b.Close()
+	orphan.Close() // already reaped; errors ignored
+}

@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,6 +26,18 @@ import (
 	"github.com/doonfrs/upwork-bid-helper/internal/model"
 	"github.com/doonfrs/upwork-bid-helper/internal/search"
 )
+
+// closeOnInterrupt shuts the browser down on Ctrl+C so it doesn't leave an
+// orphaned Chrome holding the profile lock.
+func closeOnInterrupt(b *browser.Browser) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		<-sig
+		b.Close()
+		os.Exit(130)
+	}()
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -71,6 +84,7 @@ func run() error {
 		return err
 	}
 	defer b.Close()
+	closeOnInterrupt(b)
 
 	page, err := b.NewPage()
 	if err != nil {
@@ -120,6 +134,7 @@ func runLogin(profile, chromePath string, timeout time.Duration) error {
 		return err
 	}
 	defer b.Close()
+	closeOnInterrupt(b)
 
 	page, err := b.NewPage()
 	if err != nil {
