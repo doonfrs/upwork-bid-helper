@@ -34,8 +34,9 @@ type Options struct {
 
 // Browser wraps a launched Chrome and its launcher for clean teardown.
 type Browser struct {
-	launcher *launcher.Launcher
-	rod      *rod.Browser
+	launcher   *launcher.Launcher
+	rod        *rod.Browser
+	profileDir string
 }
 
 // DefaultProfileDir returns the app-owned persistent profile directory.
@@ -80,7 +81,7 @@ func Launch(opts Options) (*Browser, error) {
 		l.Kill()
 		return nil, fmt.Errorf("connect to chrome: %w", err)
 	}
-	return &Browser{launcher: l, rod: b}, nil
+	return &Browser{launcher: l, rod: b, profileDir: profile}, nil
 }
 
 // NewPage opens a blank page.
@@ -127,3 +128,45 @@ func Probe(page *rod.Page) Status {
 		return StatusLoading
 	}
 }
+
+// Auth is the authentication state observed on an auth-gated Upwork page.
+type Auth string
+
+const (
+	AuthIn      Auth = "in"      // signed in (an /nx/ app route rendered)
+	AuthLogin   Auth = "login"   // on a login / signup / account-security page
+	AuthCaptcha Auth = "captcha" // a challenge is blocking
+	AuthUnknown Auth = "unknown" // still loading / indeterminate
+)
+
+// authJS runs on an auth-gated route. Logged-out users get bounced to a login
+// page, so reaching an /nx/ app route with the SPA initialized means signed in.
+const authJS = `() => {
+  if (document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"], #px-captcha, [id^="px-captcha"]')) return 'captcha';
+  const p = location.pathname;
+  if (/account-security|\/login\b|\/signup/i.test(p)) return 'login';
+  if (/^\/nx\//.test(p) && window.__NUXT__) return 'in';
+  return 'unknown';
+}`
+
+// AuthState reports whether the current (auth-gated) page shows a signed-in session.
+func AuthState(page *rod.Page) Auth {
+	obj, err := page.Eval(authJS)
+	if err != nil {
+		return AuthUnknown
+	}
+	switch Auth(obj.Value.Str()) {
+	case AuthIn:
+		return AuthIn
+	case AuthLogin:
+		return AuthLogin
+	case AuthCaptcha:
+		return AuthCaptcha
+	default:
+		return AuthUnknown
+	}
+}
+
+// ProfileDir returns the profile directory this browser was launched with, for
+// reporting to the user.
+func (b *Browser) ProfileDir() string { return b.profileDir }

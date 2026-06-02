@@ -45,8 +45,14 @@ func run() error {
 	)
 	flag.Parse()
 	args := flag.Args()
+
+	// `login` subcommand: open Upwork visibly, let the user sign in, persist the session.
+	if len(args) >= 1 && args[0] == "login" {
+		return runLogin(*profile, *chromePath, *timeout)
+	}
+
 	if len(args) == 0 {
-		return fmt.Errorf("GUI mode is not implemented yet.\nUsage:\n  upwork-bid-helper <upwork-url>\n  upwork-bid-helper q=\"react native\" category=...")
+		return fmt.Errorf("nothing to do.\nUsage:\n  upwork-bid-helper login                 # sign in once; saves the session\n  upwork-bid-helper <upwork-url>          # export a feed/search/job page\n  upwork-bid-helper q=\"react native\" ...   # build a search and export\n(GUI mode arrives in a later step.)")
 	}
 
 	target := resolveTarget(args)
@@ -87,6 +93,58 @@ func run() error {
 		fmt.Println(p)
 	}
 	return nil
+}
+
+// loginURL is an auth-gated page: logged-out users are bounced to a login page,
+// so reaching it signed-in is a reliable "you're logged in" signal.
+const loginURL = "https://www.upwork.com/nx/find-work/most-recent"
+
+// runLogin opens a visible browser, waits for the user to sign in (and solve any
+// challenge), and exits once an authenticated session is detected. The session
+// is written to the persistent profile and reused by later runs.
+func runLogin(profile, chromePath string, timeout time.Duration) error {
+	b, err := browser.Launch(browser.Options{ProfileDir: profile, ChromePath: chromePath})
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+
+	page, err := b.NewPage()
+	if err != nil {
+		return err
+	}
+	if err := page.Navigate(loginURL); err != nil {
+		return fmt.Errorf("navigate: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "A Chrome window opened at Upwork.\n")
+	fmt.Fprintf(os.Stderr, "→ Sign in there (and solve any CAPTCHA). I'll detect when you're in and save the session.\n")
+	fmt.Fprintf(os.Stderr, "  Profile: %s\n", b.ProfileDir())
+
+	deadline := time.Now().Add(timeout)
+	var notedLogin, notedCaptcha bool
+	for time.Now().Before(deadline) {
+		switch browser.AuthState(page) {
+		case browser.AuthIn:
+			// Give Chrome a moment to flush cookies to the profile before closing.
+			time.Sleep(1500 * time.Millisecond)
+			fmt.Fprintf(os.Stderr, "✓ Logged in — session saved.\n")
+			fmt.Fprintf(os.Stderr, "Now you can export, e.g.:\n  upwork-bid-helper %q\n", loginURL)
+			return nil
+		case browser.AuthLogin:
+			if !notedLogin {
+				fmt.Fprintf(os.Stderr, "  …waiting for you to sign in.\n")
+				notedLogin = true
+			}
+		case browser.AuthCaptcha:
+			if !notedCaptcha {
+				fmt.Fprintf(os.Stderr, "  …a challenge is showing — please solve it in the window.\n")
+				notedCaptcha = true
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return fmt.Errorf("timed out after %s. If you did sign in, your session is likely already saved — just re-run a command; otherwise run `login` again", timeout)
 }
 
 // resolveTarget returns the URL to visit: a full URL passed directly, or one
