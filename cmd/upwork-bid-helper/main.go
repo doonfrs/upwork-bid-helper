@@ -87,6 +87,10 @@ func run() error {
 	if !res.Exportable() {
 		return fmt.Errorf("nothing to export (page type %q, %d jobs) — open a feed, search, or job page", res.PageType, res.Count)
 	}
+	// Refresh the saved session with the (possibly rotated) cookies from this run.
+	if err := b.SaveState(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
+	}
 
 	formats, err := parseFormats(*format)
 	if err != nil {
@@ -134,10 +138,14 @@ func runLogin(profile, chromePath string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		switch browser.AuthState(page) {
 		case browser.AuthIn:
-			// Give Chrome a moment to flush cookies to the profile before closing.
+			// Let Upwork finish setting auth cookies, then snapshot the session
+			// (incl. the httpOnly/session cookies Chrome would otherwise drop).
 			time.Sleep(1500 * time.Millisecond)
+			if err := b.SaveState(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
+			}
 			fmt.Fprintf(os.Stderr, "✓ Logged in — session saved.\n")
-			fmt.Fprintf(os.Stderr, "Now you can export, e.g.:\n  upwork-bid-helper %q\n", loginURL)
+			fmt.Fprintf(os.Stderr, "Now you can export, e.g.:\n  upwork-bid-helper recent\n")
 			return nil
 		case browser.AuthLogin:
 			if !notedLogin {

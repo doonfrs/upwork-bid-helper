@@ -3,6 +3,8 @@
 package browser
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +29,10 @@ const (
 type Options struct {
 	ProfileDir string // persistent user-data-dir; defaults to the app config dir
 	ChromePath string // explicit Chrome binary; defaults to the system Chrome
+	// StateFile is a JSON file of saved cookies (incl. session/httpOnly ones that
+	// Chrome drops on close). Restored on launch; written by SaveState. Empty =>
+	// derive a path from the profile dir.
+	StateFile string
 	// Headless launches without a window. ONLY for local/offline file:// tests —
 	// never against live Upwork, where headless is instantly bot-flagged.
 	Headless bool
@@ -37,6 +43,7 @@ type Browser struct {
 	launcher   *launcher.Launcher
 	rod        *rod.Browser
 	profileDir string
+	stateFile  string
 }
 
 // DefaultProfileDir returns the app-owned persistent profile directory.
@@ -81,7 +88,19 @@ func Launch(opts Options) (*Browser, error) {
 		l.Kill()
 		return nil, fmt.Errorf("connect to chrome: %w", err)
 	}
-	return &Browser{launcher: l, rod: b, profileDir: profile}, nil
+
+	stateFile := opts.StateFile
+	if stateFile == "" {
+		stateFile = profile + ".cookies.json"
+	}
+	br := &Browser{launcher: l, rod: b, profileDir: profile, stateFile: stateFile}
+
+	// Restore cookies (incl. the session/httpOnly auth cookies Chrome drops on
+	// close) before any navigation, so the logged-in session is reused.
+	if err := br.loadState(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not restore saved session: %v\n", err)
+	}
+	return br, nil
 }
 
 // NewPage opens a blank page.
@@ -98,6 +117,82 @@ func (b *Browser) Close() {
 		b.launcher.Kill()
 	}
 }
+
+// SaveState writes the browser's current cookies (including session/httpOnly
+// ones) to the state file, so the next run can restore the logged-in session.
+// Call this only when a good session is in hand (after login / a successful run).
+func (b *Browser) SaveState() error {
+	if b.stateFile == "" {
+		return nil
+	}
+	cookies, err := b.rod.GetCookies()
+	if err != nil {
+		return fmt.Errorf("get cookies: %w", err)
+	}
+	if len(cookies) == 0 {
+		// Don't clobber a previously saved session with an empty set (e.g. a
+		// file:// run, which has no cookies).
+		return nil
+	}
+	data, err := json.MarshalIndent(cookies, "", " ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(b.stateFile, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", b.stateFile, err)
+	}
+	return nil
+}
+
+// loadState restores cookies saved by SaveState. A missing file is not an error.
+func (b *Browser) loadState() error {
+	if b.stateFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(b.stateFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var cookies []*proto.NetworkCookie
+	if err := json.Unmarshal(data, &cookies); err != nil {
+		return fmt.Errorf("parse %s: %w", b.stateFile, err)
+	}
+	if len(cookies) == 0 {
+		return nil
+	}
+	return b.rod.SetCookies(cookiesToParams(cookies))
+}
+
+// cookiesToParams converts stored cookies into settable params. Session cookies
+// (Session=true) are restored with no expiry so they stay session-scoped.
+func cookiesToParams(cs []*proto.NetworkCookie) []*proto.NetworkCookieParam {
+	params := make([]*proto.NetworkCookieParam, 0, len(cs))
+	for _, c := range cs {
+		p := &proto.NetworkCookieParam{
+			Name:         c.Name,
+			Value:        c.Value,
+			Domain:       c.Domain,
+			Path:         c.Path,
+			Secure:       c.Secure,
+			HTTPOnly:     c.HTTPOnly,
+			SameSite:     c.SameSite,
+			Priority:     c.Priority,
+			SameParty:    c.SameParty,
+			SourceScheme: c.SourceScheme,
+		}
+		if !c.Session && c.Expires > 0 {
+			p.Expires = c.Expires
+		}
+		params = append(params, p)
+	}
+	return params
+}
+
+// DefaultStateFile returns the cookie state file path for the default profile.
+func DefaultStateFile() string { return DefaultProfileDir() + ".cookies.json" }
 
 // statusJS classifies the page state from within the page.
 const statusJS = `() => {
