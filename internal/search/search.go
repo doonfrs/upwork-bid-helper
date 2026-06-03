@@ -1,8 +1,9 @@
-// Package search builds an Upwork job-search URL from key=value arguments.
+// Package search resolves CLI arguments to an Upwork target URL: a find-work
+// feed shortcut (myfeed, best, recent, saved) or a full URL.
 package search
 
 import (
-	"net/url"
+	"fmt"
 	"strings"
 )
 
@@ -11,8 +12,6 @@ const findWork = "https://www.upwork.com/nx/find-work/"
 // Known Upwork page URLs, exposed as constants for reuse. These mirror the
 // find-work tabs: My Feed (the base route), Best Matches, Most Recent, Saved Jobs.
 const (
-	// BaseURL is the Upwork job search endpoint.
-	BaseURL = "https://www.upwork.com/nx/search/jobs/"
 	// URLMyFeed is the "My Feed" tab (the default find-work page).
 	URLMyFeed = findWork
 	// URLBestMatches is the "Best Matches" tab.
@@ -41,17 +40,19 @@ func Alias(name string) (string, bool) {
 // Resolve turns CLI args into a target URL:
 //   - a single full URL (http/https/file) is used as-is
 //   - a single known shortcut (myfeed, best, recent, saved) expands to its URL
-//   - anything else is treated as key=val search args / bare query terms
-func Resolve(args []string) string {
+//
+// Anything else is unsupported (keyword search is blocked by Upwork's bot
+// challenge, so it is not built here).
+func Resolve(args []string) (string, error) {
 	if len(args) == 1 {
 		if IsURL(args[0]) {
-			return args[0]
+			return args[0], nil
 		}
 		if u, ok := Alias(args[0]); ok {
-			return u
+			return u, nil
 		}
 	}
-	return BuildURL(ParseArgs(args))
+	return "", fmt.Errorf("unrecognized target %q — use a page (myfeed, best, recent, saved) or a full Upwork URL", strings.Join(args, " "))
 }
 
 // IsURL reports whether s looks like a full URL rather than a key=val arg.
@@ -60,45 +61,4 @@ func IsURL(s string) bool {
 	return strings.HasPrefix(s, "http://") ||
 		strings.HasPrefix(s, "https://") ||
 		strings.HasPrefix(s, "file://")
-}
-
-// ParseArgs turns ["q=react native", "category=web"] into a map. Values may
-// contain '='; only the first '=' splits. Args without '=' become a bare query
-// term appended to q.
-func ParseArgs(args []string) map[string]string {
-	m := map[string]string{}
-	var terms []string
-	for _, a := range args {
-		if i := strings.Index(a, "="); i >= 0 {
-			k := strings.TrimSpace(a[:i])
-			v := a[i+1:]
-			if k != "" {
-				m[k] = v
-			}
-		} else if a != "" {
-			terms = append(terms, a)
-		}
-	}
-	if len(terms) > 0 {
-		joined := strings.Join(terms, " ")
-		if existing, ok := m["q"]; ok && existing != "" {
-			m["q"] = existing + " " + joined
-		} else {
-			m["q"] = joined
-		}
-	}
-	return m
-}
-
-// BuildURL assembles the search URL from parsed args. Unknown keys are passed
-// through as query parameters so the tool stays useful as Upwork adds filters.
-func BuildURL(args map[string]string) string {
-	q := url.Values{}
-	for k, v := range args {
-		q.Set(k, v)
-	}
-	if len(q) == 0 {
-		return BaseURL
-	}
-	return BaseURL + "?" + q.Encode()
 }

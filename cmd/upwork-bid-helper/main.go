@@ -28,6 +28,13 @@ import (
 	"github.com/doonfrs/upwork-bid-helper/internal/search"
 )
 
+// holdOpen keeps the visible browser open for manual interaction until Ctrl+C
+// (handled by closeOnInterrupt). Shared by --hold across all commands.
+func holdOpen() {
+	fmt.Fprintln(os.Stderr, "Browser is open for manual testing. Interact in the window; press Ctrl+C here to close.")
+	select {} // block forever; Ctrl+C is handled by closeOnInterrupt
+}
+
 // closeOnInterrupt shuts the browser down on Ctrl+C so it doesn't leave an
 // orphaned Chrome holding the profile lock.
 func closeOnInterrupt(b *browser.Browser) {
@@ -56,11 +63,11 @@ func run() error {
 		timeout    = flag.Duration("timeout", 90*time.Second, "max wait for the page to load")
 		dryRun     = flag.Bool("dry-run", false, "print the resolved target URL and exit (does not open the browser)")
 		gui        = flag.Bool("gui", false, "show the browser window during export (disables headless; useful for debugging or pages behind a challenge)")
-		query      = flag.String("q", "", "search query (e.g. --q \"react native\"); combine with key=value filter args")
+		hold       = flag.Bool("hold", false, "open a visible browser, navigate, then keep it open for manual testing (Ctrl+C to close; no export)")
 	)
-	// Go's flag package stops at the first non-flag arg, so `q=x --gui` would
-	// treat --gui as a positional. Loop the parse to allow flags and positional
-	// args (search terms, a URL, or `login`) in any order.
+	// Go's flag package stops at the first non-flag arg, so `recent --gui` would
+	// treat --gui as a positional. Loop the parse to allow flags and the
+	// positional arg (a page shortcut, a URL, or `login`) in any order.
 	var args []string
 	rest := os.Args[1:]
 	for {
@@ -77,24 +84,28 @@ func run() error {
 
 	// `login` subcommand: open Upwork visibly, let the user sign in, persist the session.
 	if len(args) >= 1 && args[0] == "login" {
-		return runLogin(*profile, *chromePath, *timeout)
+		return runLogin(*profile, *chromePath, *timeout, *hold)
 	}
 
-	// --q feeds the search builder, same as a positional q=... arg.
-	if *query != "" {
-		args = append([]string{"q=" + *query}, args...)
+	// --hold with no target defaults to the find-work home so you have a page to
+	// poke at manually.
+	if *hold && len(args) == 0 {
+		args = []string{"myfeed"}
 	}
 
 	if len(args) == 0 {
 		return fmt.Errorf("nothing to do.\nUsage:\n" +
 			"  upwork-bid-helper login                  # sign in once; saves the session\n" +
 			"  upwork-bid-helper <page>                 # use myfeed, best, recent, saved\n" +
-			"  upwork-bid-helper <upwork-url>           # export a feed/search/job page\n" +
-			"  upwork-bid-helper --q \"react native\"      # build a search and export\n" +
-			"  upwork-bid-helper --gui --q laravel      # same, with a visible window")
+			"  upwork-bid-helper <upwork-url>           # export a feed or job page\n" +
+			"  upwork-bid-helper --gui recent           # export with a visible window\n" +
+			"  upwork-bid-helper --hold recent          # open and keep the window open")
 	}
 
-	target := resolveTarget(args)
+	target, err := resolveTarget(args)
+	if err != nil {
+		return err
+	}
 	if *dryRun {
 		fmt.Println(target)
 		return nil
@@ -102,8 +113,8 @@ func run() error {
 	fmt.Fprintf(os.Stderr, "target: %s\n", target)
 
 	// Exports run headless (background, no window) by default; --gui shows the
-	// window (e.g. to watch a page or get past a challenge headless can't clear).
-	b, err := browser.Launch(browser.Options{ProfileDir: *profile, ChromePath: *chromePath, Headless: !*gui})
+	// window. --hold always runs visibly so you can interact.
+	b, err := browser.Launch(browser.Options{ProfileDir: *profile, ChromePath: *chromePath, Headless: !*gui && !*hold})
 	if err != nil {
 		return err
 	}
@@ -118,12 +129,17 @@ func run() error {
 		return fmt.Errorf("navigate: %w", err)
 	}
 
+	// --hold: leave the window open for manual testing instead of extracting.
+	if *hold {
+		holdOpen()
+	}
+
 	res, err := waitAndExtract(page, *timeout)
 	if err != nil {
 		return err
 	}
 	if !res.Exportable() {
-		return fmt.Errorf("nothing to export (page type %q, %d jobs) — open a feed, search, or job page", res.PageType, res.Count)
+		return fmt.Errorf("nothing to export (page type %q, %d jobs) — open a feed or job page", res.PageType, res.Count)
 	}
 	// Refresh the saved session with the (possibly rotated) cookies from this run.
 	if err := b.SaveState(); err != nil {
@@ -152,7 +168,7 @@ const loginURL = "https://www.upwork.com/nx/find-work/most-recent"
 // runLogin opens a visible browser, waits for the user to sign in (and solve any
 // challenge), and exits once an authenticated session is detected. The session
 // is written to the persistent profile and reused by later runs.
-func runLogin(profile, chromePath string, timeout time.Duration) error {
+func runLogin(profile, chromePath string, timeout time.Duration, hold bool) error {
 	b, err := browser.Launch(browser.Options{ProfileDir: profile, ChromePath: chromePath})
 	if err != nil {
 		return err
@@ -184,6 +200,9 @@ func runLogin(profile, chromePath string, timeout time.Duration) error {
 				fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
 			}
 			fmt.Fprintf(os.Stderr, "✓ Logged in — session saved.\n")
+			if hold {
+				holdOpen()
+			}
 			fmt.Fprintf(os.Stderr, "Now you can export, e.g.:\n  upwork-bid-helper recent\n")
 			return nil
 		case browser.AuthLogin:
@@ -202,9 +221,9 @@ func runLogin(profile, chromePath string, timeout time.Duration) error {
 	return fmt.Errorf("timed out after %s. If you did sign in, your session is likely already saved — just re-run a command; otherwise run `login` again", timeout)
 }
 
-// resolveTarget returns the URL to visit: a full URL, a known shortcut
-// (recent, feed, …), or one built from key=val search args.
-func resolveTarget(args []string) string {
+// resolveTarget returns the URL to visit: a full URL or a known page shortcut
+// (myfeed, best, recent, saved).
+func resolveTarget(args []string) (string, error) {
 	return search.Resolve(args)
 }
 
