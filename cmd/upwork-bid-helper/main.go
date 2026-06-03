@@ -244,12 +244,13 @@ func resolveTarget(args []string) (string, error) {
 	return search.Resolve(args)
 }
 
-// allFeeds are the find-work feeds the `all` command sweeps and merges.
+// allFeeds are the find-work feeds the `all` command sweeps and merges. Saved
+// Jobs is intentionally excluded — it's a personal bookmark list, not a source
+// of new jobs to bid on.
 var allFeeds = []struct{ name, url string }{
 	{"myfeed", search.URLMyFeed},
 	{"best", search.URLBestMatches},
 	{"recent", search.URLMostRecent},
-	{"saved", search.URLSavedJobs},
 }
 
 // exportAll visits each find-work feed in turn and merges their jobs into one
@@ -296,6 +297,7 @@ var errLoginRequired = errors.New("login required — run: upwork-bid-helper log
 // extractor. If Upwork shows login/CAPTCHA, it returns errLoginRequired.
 func waitAndExtract(page *rod.Page, timeout time.Duration) (*model.Result, error) {
 	deadline := time.Now().Add(timeout)
+	var readyEmptyAt time.Time // first time we saw a ready page with no jobs
 	for time.Now().Before(deadline) {
 		switch browser.Probe(page) {
 		case browser.StatusLogin, browser.StatusCaptcha:
@@ -306,6 +308,15 @@ func waitAndExtract(page *rod.Page, timeout time.Duration) (*model.Result, error
 				return nil, err
 			}
 			if res.Exportable() || res.PageType == model.PageUnknown {
+				return res, nil
+			}
+			// Ready but no jobs: this is a genuinely empty feed (e.g. no saved
+			// jobs), not a still-loading one. Give a brief grace for late jobs to
+			// appear, then accept the empty result instead of waiting out the
+			// full timeout.
+			if readyEmptyAt.IsZero() {
+				readyEmptyAt = time.Now()
+			} else if time.Since(readyEmptyAt) >= 3*time.Second {
 				return res, nil
 			}
 		}
