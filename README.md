@@ -21,11 +21,63 @@ Fast, cheap, and easy to automate.
 
 ## What it exports
 
-Every job comes out as structured data: title, description, budget
-(hourly/fixed), skills, tags, experience level, posted/renewed dates, proposals
-(tier **and** exact applicant count where available), connects, job status,
-preferred freelancer location, and the client (country, payment-verified, total
-spent, hires, jobs posted, rating, last recruiting activity, and more).
+Every job comes out as structured data. The exact schema (JSON field names) is below.
+
+**Job**
+
+| field | type | notes |
+|-------|------|-------|
+| `id` | string | ciphertext id, e.g. `~021234…` |
+| `uid` | string | numeric id |
+| `recno` | string | Upwork record number |
+| `url` | string | derived from `id` |
+| `title` | string | |
+| `description` | string | |
+| `type` | string | `hourly` or `fixed` |
+| `hourlyMin` / `hourlyMax` | number | hourly range (0 if fixed) |
+| `fixedBudget` | number | fixed price (0 if hourly) |
+| `weeklyBudget` | number | rarely set |
+| `engagement` | string | e.g. `Less than 30 hrs/week` |
+| `duration` | string | e.g. `More than 6 months` |
+| `experienceLevel` | string | `Entry Level` / `Intermediate` / `Expert` |
+| `freelancersToHire` | int | |
+| `proposalsTier` | string | bucket, e.g. `5 to 10` |
+| `totalApplicants` | int | exact count — **my-feed only** |
+| `premium` / `applied` / `enterprise` | bool | |
+| `jobStatus` | string | e.g. `Open` — **my-feed only** |
+| `isLocal` | bool | **my-feed only** |
+| `prefFreelancerLocation` | string[] | preferred countries — **my-feed only** |
+| `prefFreelancerLocationMandatory` | bool | |
+| `createdOn` / `publishedOn` | string | ISO 8601 |
+| `renewedOn` | string | ISO 8601 — **my-feed only** |
+| `connectPrice` | int | connects to apply |
+| `position` | int | rank within the feed |
+| `skills` | string[] | |
+| `tags` | string[] | e.g. `firstJobPost`, `contractToHireSet` |
+| `client` | object | see below |
+
+**Client**
+
+| field | type | notes |
+|-------|------|-------|
+| `paymentVerified` | bool | |
+| `totalSpent` | number | USD across all contracts |
+| `totalReviews` | int | |
+| `rating` | number | 0–5 |
+| `totalHires` | int | |
+| `totalPostedJobs` | int | **my-feed only** |
+| `country` | string | name or ISO-3 code (Upwork is inconsistent) |
+| `city` | string | usually empty in feeds |
+| `topClient` | bool | |
+| `financialPrivacy` | bool | client hides spend/reviews |
+| `lastRecruitingActivity` | string | ISO 8601; empty if none |
+| `companyOrgUid` | string | stable client-org id — **my-feed only** |
+
+> **Feeds use two shapes.** `most-recent` and `best` send a *lean* payload;
+> `my-feed` sends a *richer* one. Fields marked **my-feed only** above are absent
+> from `recent`/`best` exports and come out as `0` / `""` / `[]` there. In `all`
+> mode, jobs are deduplicated keeping the `myfeed` copy first, so shared jobs keep
+> the richer fields.
 
 > **What's *not* available:** the client's **average hourly rate** and **total
 > hours billed** are not in any feed payload — Upwork only shows them on the
