@@ -97,20 +97,32 @@ func run() error {
 		return fmt.Errorf("nothing to do.\nUsage:\n" +
 			"  upwork-bid-helper login                  # sign in once; saves the session\n" +
 			"  upwork-bid-helper <page>                 # use myfeed, best, recent, saved\n" +
+			"  upwork-bid-helper all                    # sweep every feed, merge + dedupe\n" +
 			"  upwork-bid-helper <upwork-url>           # export a feed or job page\n" +
 			"  upwork-bid-helper --gui recent           # export with a visible window\n" +
 			"  upwork-bid-helper --hold recent          # open and keep the window open")
 	}
 
-	target, err := resolveTarget(args)
-	if err != nil {
-		return err
+	// `all` sweeps every feed and merges them; otherwise resolve a single target.
+	allMode := len(args) == 1 && strings.EqualFold(args[0], "all")
+	var target string
+	if !allMode {
+		t, err := resolveTarget(args)
+		if err != nil {
+			return err
+		}
+		target = t
 	}
 	if *dryRun {
-		fmt.Println(target)
+		if allMode {
+			for _, f := range allFeeds {
+				fmt.Println(f.url)
+			}
+		} else {
+			fmt.Println(target)
+		}
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "target: %s\n", target)
 
 	// Exports run headless (background, no window) by default; --gui shows the
 	// window. --hold always runs visibly so you can interact.
@@ -125,16 +137,21 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := page.Navigate(target); err != nil {
-		return fmt.Errorf("navigate: %w", err)
-	}
 
-	// --hold: leave the window open for manual testing instead of extracting.
-	if *hold {
-		holdOpen()
+	var res *model.Result
+	if allMode {
+		res, err = exportAll(page, *timeout)
+	} else {
+		fmt.Fprintf(os.Stderr, "target: %s\n", target)
+		if nerr := page.Navigate(target); nerr != nil {
+			return fmt.Errorf("navigate: %w", nerr)
+		}
+		// --hold: leave the window open for manual testing instead of extracting.
+		if *hold {
+			holdOpen()
+		}
+		res, err = waitAndExtract(page, *timeout)
 	}
-
-	res, err := waitAndExtract(page, *timeout)
 	if err != nil {
 		return err
 	}
@@ -225,6 +242,49 @@ func runLogin(profile, chromePath string, timeout time.Duration, hold bool) erro
 // (myfeed, best, recent, saved).
 func resolveTarget(args []string) (string, error) {
 	return search.Resolve(args)
+}
+
+// allFeeds are the find-work feeds the `all` command sweeps and merges.
+var allFeeds = []struct{ name, url string }{
+	{"myfeed", search.URLMyFeed},
+	{"best", search.URLBestMatches},
+	{"recent", search.URLMostRecent},
+	{"saved", search.URLSavedJobs},
+}
+
+// exportAll visits each find-work feed in turn and merges their jobs into one
+// result, deduplicating by job ID (falling back to UID). A login/challenge wall
+// on any feed aborts the run, since it means the session needs refreshing.
+func exportAll(page *rod.Page, timeout time.Duration) (*model.Result, error) {
+	combined := &model.Result{PageType: model.PageAll}
+	seen := map[string]bool{}
+	for _, f := range allFeeds {
+		if err := page.Navigate(f.url); err != nil {
+			return nil, fmt.Errorf("navigate %s: %w", f.name, err)
+		}
+		res, err := waitAndExtract(page, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f.name, err)
+		}
+		added := 0
+		for _, j := range res.Jobs {
+			key := j.ID
+			if key == "" {
+				key = j.UID
+			}
+			if key != "" {
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+			}
+			combined.Jobs = append(combined.Jobs, j)
+			added++
+		}
+		fmt.Fprintf(os.Stderr, "  %-7s %d jobs (%d new)\n", f.name, len(res.Jobs), added)
+	}
+	combined.Count = len(combined.Jobs)
+	return combined, nil
 }
 
 // errLoginRequired is returned when an export hits a login/challenge wall.

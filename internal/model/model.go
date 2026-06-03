@@ -11,6 +11,7 @@ const (
 	PageFeed    PageType = "feed"
 	PageSearch  PageType = "search"
 	PageJob     PageType = "job"
+	PageAll     PageType = "all" // several feeds merged + deduplicated
 	PageUnknown PageType = "unknown"
 )
 
