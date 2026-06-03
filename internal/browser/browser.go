@@ -50,6 +50,7 @@ type Browser struct {
 	rod        *rod.Browser
 	profileDir string
 	stateFile  string
+	userAgent  string // UA override applied to new pages (HeadlessChrome stripped)
 }
 
 // DefaultProfileDir returns the app-owned persistent profile directory.
@@ -98,7 +99,12 @@ func Launch(opts Options) (*Browser, error) {
 	// writes the POSIX SingletonLock symlink, so we cannot rely on it there.
 	writeOwnerPID(profile, l.PID())
 
-	b := rod.New().ControlURL(controlURL)
+	// NoDefaultDevice: rod otherwise emulates devices.LaptopWithMDPIScreen on
+	// every page, which forces a macOS/Chrome-114 User-Agent. On Windows that
+	// UA contradicts navigator.platform (Win32) and is stale — a fingerprint
+	// mismatch that makes Cloudflare's "Just a moment…" challenge loop forever.
+	// We keep Chrome's own native UA instead.
+	b := rod.New().ControlURL(controlURL).NoDefaultDevice()
 	if err := b.Connect(); err != nil {
 		l.Kill()
 		return nil, fmt.Errorf("connect to chrome: %w", err)
@@ -110,6 +116,14 @@ func Launch(opts Options) (*Browser, error) {
 	}
 	br := &Browser{launcher: l, rod: b, profileDir: profile, stateFile: stateFile}
 
+	// Headless Chrome advertises "HeadlessChrome/<ver>" in its User-Agent, which
+	// Cloudflare treats as a bot. Mirror the real UA with that token rewritten to
+	// "Chrome" so headless exports look like an ordinary browser. Headed UAs have
+	// no such token, so this is a no-op there.
+	if v, err := (proto.BrowserGetVersion{}).Call(b); err == nil {
+		br.userAgent = strings.Replace(v.UserAgent, "HeadlessChrome", "Chrome", 1)
+	}
+
 	// Restore cookies (incl. the session/httpOnly auth cookies Chrome drops on
 	// close) before any navigation, so the logged-in session is reused.
 	if err := br.loadState(); err != nil {
@@ -118,9 +132,24 @@ func Launch(opts Options) (*Browser, error) {
 	return br, nil
 }
 
-// NewPage opens a blank page.
+// NewPage opens a blank page with the de-headlessed User-Agent applied before
+// any navigation, so the very first (Cloudflare-gated) document request carries
+// it. AcceptLanguage is set to a realistic value; Platform is left native so it
+// stays consistent with navigator.platform across OSes.
 func (b *Browser) NewPage() (*rod.Page, error) {
-	return b.rod.Page(proto.TargetCreateTarget{})
+	page, err := b.rod.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return nil, err
+	}
+	if b.userAgent != "" {
+		if err := page.SetUserAgent(&proto.NetworkSetUserAgentOverride{
+			UserAgent:      b.userAgent,
+			AcceptLanguage: "en-US,en",
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not set user agent: %v\n", err)
+		}
+	}
+	return page, nil
 }
 
 // Close shuts the browser down and reaps the Chrome process.
