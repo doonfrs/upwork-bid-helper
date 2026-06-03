@@ -1,12 +1,48 @@
 # upwork-bid-helper
 
-Drives a real Chrome (via [go-rod](https://github.com/go-rod/rod)) to export Upwork
-**feed**, **search**, or **single-job** pages to **JSON / CSV / XML**. It reads the
-data the page already loaded (`window.__NUXT__` / the Nuxt3 `__NUXT_DATA__` payload),
-so there is no fragile HTML scraping.
+A command-line tool that exports your Upwork job feeds to **JSON** (or CSV/XML),
+so a script or an AI model can read them, rank them, and decide what's worth
+bidding on — without you (or an AI agent) clicking through a browser every time.
 
-> Console-only tool. Upcoming: hidden/off-screen mode, network interception, and
-> richer single-job client data.
+## Why
+
+Browsing Upwork through an AI agent is slow and expensive — every search, scroll,
+and click burns screenshots and tokens. This tool flips it around:
+
+1. Run it on a schedule (say, hourly). It opens Upwork in the background, grabs
+   your feeds, and writes a clean JSON file.
+2. Your script or AI reads that JSON, filters/ranks the jobs, and picks the good
+   ones.
+3. You only open the browser when there's actually a job worth bidding on.
+
+Fast, cheap, and easy to automate.
+
+## What it exports
+
+Every job comes out as structured data: title, description, budget
+(hourly/fixed), skills, posted/renewed dates, proposals, connects, and the client
+(country, payment-verified, total spent, hires, rating, and more).
+
+It can export any of your Find Work feeds:
+
+| command  | feed                                              |
+|----------|---------------------------------------------------|
+| `myfeed` | your personalized feed (from your saved searches) |
+| `best`   | Best Matches                                      |
+| `recent` | Most Recent                                       |
+| `saved`  | Saved (bookmarked) jobs                           |
+
+…or a single job from its URL.
+
+> **No keyword search.** Upwork puts the search page behind a Cloudflare bot
+> challenge that blocks automated browsers, so search isn't supported. The feeds
+> above are *not* blocked — set up Saved Searches on Upwork (they power `myfeed`)
+> to get keyword-targeted results.
+
+## Requirements
+
+- Go 1.23+
+- Google Chrome
 
 ## Build
 
@@ -14,62 +50,97 @@ so there is no fragile HTML scraping.
 go build -o upwork-bid-helper ./cmd/upwork-bid-helper
 ```
 
-Requires Go 1.23+ and Google Chrome installed.
+On Windows:
+
+```powershell
+go build -o upwork-bid-helper.exe ./cmd/upwork-bid-helper
+```
 
 ## Usage
 
+### 1. Sign in once
+
 ```sh
-# Sign in once (opens a visible Chrome; session is saved & reused):
 upwork-bid-helper login
-
-# Shortcuts (no full URL needed) — one per find-work tab:
-upwork-bid-helper myfeed          # My Feed
-upwork-bid-helper best            # Best Matches
-upwork-bid-helper recent          # Most Recent
-upwork-bid-helper saved           # Saved Jobs
-
-# A full Upwork URL also works (feed, search, or a job page):
-upwork-bid-helper "https://www.upwork.com/jobs/~02xxxxxxxxxxxxxxxxx"
-
-# Or build a search from key=value args (bare words become the query):
-upwork-bid-helper q="react native" payment_verified=1
 ```
 
-Available shortcuts: `myfeed`, `best`, `recent`, `saved`.
+Opens a visible Chrome — sign in to Upwork (and solve any CAPTCHA). Your session
+is saved and reused on every later run; you won't sign in again unless it expires.
 
-**Visibility:** `login` opens a **visible** window so you can sign in (and solve any
-CAPTCHA); the session is saved to a persistent profile and reused on later runs.
-Exports (`recent`, a URL, a search) run **headless** (background, no window) — with the
-restored session cookies Upwork serves the authenticated pages fine. If an export hits a
-login/challenge wall it exits with `login required — run: upwork-bid-helper login`.
+### 2. Export a feed
 
-### Flags
+```sh
+upwork-bid-helper myfeed     # your personalized feed
+upwork-bid-helper best       # best matches
+upwork-bid-helper recent     # most recent
+upwork-bid-helper saved      # saved jobs
+```
 
-| flag | default | meaning |
-|------|---------|---------|
-| `--format` | `json` | `json` \| `csv` \| `xml` \| `all` (or comma-separated, e.g. `json,csv`) |
-| `--out` | auto | output file, or filename prefix when multiple formats |
-| `--chrome` | system Chrome | path to a Chrome binary |
-| `--profile` | app config dir | persistent profile directory |
-| `--timeout` | `90s` | max wait for the page to load |
-| `--dry-run` | off | print the resolved target URL and exit (does not open the browser) |
+These run in the background (no window) and write a file like
+`upwork-feed-20260603-2130.json`.
 
-`file://` paths are accepted as targets so you can export from a saved page offline.
+### 3. Export everything at once
 
-## Test
+```sh
+upwork-bid-helper all
+```
+
+Sweeps **myfeed + best + recent** in one run, merges them, removes duplicates, and
+writes a single `upwork-all-….json`. This is the one to schedule.
+
+### 4. Load more jobs per feed
+
+You get the first page by default. To pull more, click "Load More" automatically:
+
+```sh
+upwork-bid-helper all --pages 2      # ~2 pages per feed
+upwork-bid-helper recent --pages 3   # 3 pages
+```
+
+(Best Matches is a fixed list with no "Load More", so `--pages` only adds jobs to
+`myfeed` and `recent`.)
+
+### 5. A single job
+
+```sh
+upwork-bid-helper "https://www.upwork.com/jobs/~021234567890abcdef"
+```
+
+### Choosing the output
+
+```sh
+upwork-bid-helper all --output jobs.json      # name the file
+upwork-bid-helper all --format csv            # or csv / xml
+upwork-bid-helper all --format json,csv,xml   # several at once
+```
+
+With no `--output`, it writes `upwork-<type>-<timestamp>.json` in the current
+folder.
+
+## Options
+
+| flag | default | what it does |
+|------|---------|--------------|
+| `--output` / `--out` | auto | output file (or name prefix when multiple formats) |
+| `--format` | `json` | `json`, `csv`, `xml`, `all`, or a comma list like `json,csv` |
+| `--pages` | `1` | pages to load per feed (clicks "Load More" `pages−1` times) |
+| `--gui` | off | show the browser window (handy to watch a run) |
+| `--hold` | off | do the action, then keep the window open until Ctrl+C (manual poking) |
+| `--timeout` | `90s` | how long to wait for a page to load |
+| `--dry-run` | off | print the URL(s) it would visit and exit (doesn't open the browser) |
+| `--profile` | app data dir | where the saved login/profile is kept |
+| `--chrome` | system Chrome | path to a specific Chrome binary |
+
+## Example: hourly triage
+
+```sh
+upwork-bid-helper all --pages 2 --output jobs.json
+# → hand jobs.json to Claude / Codex / your script to rank and decide,
+#   then open Upwork only for the jobs worth bidding on.
+```
+
+## Tests
 
 ```sh
 go test ./...
 ```
-
-The extractor tests load the saved samples in `temp/` (a local, gitignored scratch
-dir) in headless Chrome and assert the feed/search/single-job extraction.
-
-## Layout
-
-- `cmd/upwork-bid-helper` — CLI entrypoint
-- `internal/browser` — launch, persistent profile, challenge detection, teardown
-- `internal/extract` — page-type detection + `window.__NUXT__`/devalue extractor (`extract.js`)
-- `internal/model` — normalized `Job` / `Client` / `Result`
-- `internal/export` — JSON / CSV (formula-injection guarded) / XML (escaped)
-- `internal/search` — `key=value` → search URL builder
