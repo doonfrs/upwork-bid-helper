@@ -72,15 +72,17 @@ func writeXML(w io.Writer, res *model.Result) error {
 
 // csvHeader is the flattened column order for CSV output.
 var csvHeader = []string{
-	"id", "url", "title", "type",
+	"id", "uid", "recno", "url", "title", "type",
 	"hourlyMin", "hourlyMax", "fixedBudget", "weeklyBudget",
 	"engagement", "duration", "experienceLevel", "freelancersToHire",
-	"proposalsTier", "premium", "applied", "enterprise",
-	"createdOn", "publishedOn", "renewedOn", "connectPrice",
-	"skills", "description",
+	"proposalsTier", "totalApplicants", "premium", "applied", "enterprise",
+	"jobStatus", "isLocal", "prefFreelancerLocation", "prefFreelancerLocationMandatory",
+	"createdOn", "publishedOn", "renewedOn", "connectPrice", "position",
+	"skills", "tags", "description",
 	"client.paymentVerified", "client.totalSpent", "client.totalReviews",
-	"client.rating", "client.totalHires", "client.country", "client.city",
-	"client.topClient", "client.financialPrivacy",
+	"client.rating", "client.totalHires", "client.totalPostedJobs",
+	"client.country", "client.city", "client.topClient", "client.financialPrivacy",
+	"client.lastRecruitingActivity", "client.companyOrgUid",
 }
 
 func writeCSV(w io.Writer, res *model.Result) error {
@@ -94,15 +96,17 @@ func writeCSV(w io.Writer, res *model.Result) error {
 	}
 	for _, j := range jobs {
 		row := []string{
-			j.ID, j.URL, j.Title, j.Type,
+			j.ID, j.UID, j.Recno, j.URL, j.Title, j.Type,
 			f(j.HourlyMin), f(j.HourlyMax), f(j.FixedBudget), f(j.WeeklyBudget),
 			j.Engagement, j.Duration, j.ExperienceLevel, strconv.Itoa(j.FreelancersToHire),
-			j.ProposalsTier, b(j.Premium), b(j.Applied), b(j.Enterprise),
-			j.CreatedOn, j.PublishedOn, j.RenewedOn, strconv.Itoa(j.ConnectPrice),
-			strings.Join(j.Skills, "; "), j.Description,
+			j.ProposalsTier, strconv.Itoa(j.TotalApplicants), b(j.Premium), b(j.Applied), b(j.Enterprise),
+			j.JobStatus, b(j.IsLocal), strings.Join(j.PrefFreelancerLocation, "; "), b(j.PrefFreelancerLocationMandatory),
+			j.CreatedOn, j.PublishedOn, j.RenewedOn, strconv.Itoa(j.ConnectPrice), strconv.Itoa(j.Position),
+			strings.Join(j.Skills, "; "), strings.Join(j.Tags, "; "), j.Description,
 			b(j.Client.PaymentVerified), f(j.Client.TotalSpent), strconv.Itoa(j.Client.TotalReviews),
-			f(j.Client.Rating), strconv.Itoa(j.Client.TotalHires), j.Client.Country, j.Client.City,
-			b(j.Client.TopClient), b(j.Client.FinancialPrivacy),
+			f(j.Client.Rating), strconv.Itoa(j.Client.TotalHires), strconv.Itoa(j.Client.TotalPostedJobs),
+			j.Client.Country, j.Client.City, b(j.Client.TopClient), b(j.Client.FinancialPrivacy),
+			j.Client.LastRecruitingActivity, j.Client.CompanyOrgUID,
 		}
 		for i, v := range row {
 			row[i] = sanitizeCSV(v)

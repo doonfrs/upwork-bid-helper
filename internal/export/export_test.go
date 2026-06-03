@@ -40,7 +40,17 @@ func TestCSVInjectionGuard(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("want header + 1 row, got %d rows", len(rows))
 	}
-	title := rows[1][2] // "title" is the 3rd column
+	col := -1 // locate "title" by header name so column reordering can't break this
+	for i, h := range rows[0] {
+		if h == "title" {
+			col = i
+			break
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no \"title\" column in header: %v", rows[0])
+	}
+	title := rows[1][col]
 	if !strings.HasPrefix(title, "'=") {
 		t.Errorf("formula not neutralized, title=%q", title)
 	}

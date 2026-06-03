@@ -65,6 +65,7 @@ func run() error {
 		dryRun     = flag.Bool("dry-run", false, "print the resolved target URL and exit (does not open the browser)")
 		gui        = flag.Bool("gui", false, "show the browser window during export (disables headless; useful for debugging or pages behind a challenge)")
 		hold       = flag.Bool("hold", false, "open a visible browser, navigate, then keep it open for manual testing (Ctrl+C to close; no export)")
+		raw        = flag.Bool("raw", false, "dump the untouched client/buyer object(s) from the page as JSON and exit (diagnostic; no export)")
 	)
 	// Go's flag package stops at the first non-flag arg, so `recent --gui` would
 	// treat --gui as a positional. Loop the parse to allow flags and the
@@ -148,6 +149,19 @@ func run() error {
 	page, err := b.NewPage()
 	if err != nil {
 		return err
+	}
+
+	// --raw: diagnostic dump of the untouched client/buyer payload, then exit.
+	// Needs a single target so we know which page to inspect.
+	if *raw {
+		if allMode {
+			return fmt.Errorf("--raw needs a single target (e.g. `recent --raw` or a job URL), not `all`")
+		}
+		fmt.Fprintf(os.Stderr, "target: %s\n", target)
+		if nerr := page.Navigate(target); nerr != nil {
+			return fmt.Errorf("navigate: %w", nerr)
+		}
+		return dumpRaw(page, *timeout)
 	}
 
 	var res *model.Result
@@ -300,6 +314,33 @@ func exportAll(b *browser.Browser, page *rod.Page, timeout time.Duration, pages 
 	}
 	combined.Count = len(combined.Jobs)
 	return combined, nil
+}
+
+// dumpRaw waits for the (already-navigated) page to be ready, then prints the
+// raw client/buyer payload from the in-page diagnostic dumper to stdout. Used by
+// --raw to inspect exactly which fields Upwork ships before we normalize them.
+func dumpRaw(page *rod.Page, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		switch browser.Probe(page) {
+		case browser.StatusLogin, browser.StatusCaptcha:
+			return errLoginRequired
+		case browser.StatusReady:
+			out, err := extract.RunRaw(page)
+			if err != nil {
+				return err
+			}
+			fmt.Println(out)
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+	// Last attempt regardless of readiness, so we get output rather than a bare timeout.
+	if out, err := extract.RunRaw(page); err == nil {
+		fmt.Println(out)
+		return nil
+	}
+	return fmt.Errorf("timed out after %s waiting for the page", timeout)
 }
 
 // errLoginRequired is returned when an export hits a login/challenge wall.

@@ -7,11 +7,17 @@
 () => {
   const UPWORK = 'https://www.upwork.com';
   const jobURL = (c) => (c ? UPWORK + '/jobs/' + c : '');
-  // Upwork mixes numbers and numeric strings (and {amount} objects) across page
-  // types, so coerce everything numeric explicitly.
+  // Upwork mixes numbers and numeric strings, plus several money-object shapes
+  // across feeds: {amount} (most-recent), {rawValue, currency, displayValue}
+  // (my-feed). Coerce everything numeric explicitly, trying each known wrapper.
   const toNum = (v) => {
     if (v == null) return 0;
-    if (typeof v === 'object') return toNum(v.amount);
+    if (typeof v === 'object') {
+      if (v.amount != null) return toNum(v.amount);
+      if (v.rawValue != null) return toNum(v.rawValue);
+      if (v.displayValue != null) return toNum(v.displayValue);
+      return 0;
+    }
     const n = Number(v);
     return isFinite(n) ? n : 0;
   };
@@ -27,10 +33,13 @@
       totalReviews: toInt(c.totalReviews),
       rating: toNum(c.totalFeedback != null ? c.totalFeedback : c.score),
       totalHires: toInt(c.totalHires),
+      totalPostedJobs: toInt(c.totalPostedJobs),
       country: loc.country || c.country || '',
       city: loc.city || '',
       topClient: !!c.topClient,
       financialPrivacy: !!c.hasFinancialPrivacy,
+      lastRecruitingActivity: c.lastRecruitingActivity || '',
+      companyOrgUid: String(c.companyOrgUid || ''),
     };
   }
 
@@ -43,16 +52,32 @@
     return String(j.type || '');
   }
 
+  // Experience level differs by feed: lean feeds carry tierText ("Expert");
+  // my-feed carries contractorTier ("EXPERT"/"ENTRY_LEVEL"). Prefer tierText;
+  // fall back to a title-cased contractorTier so the column stays consistent.
+  // (tierLabel is deliberately ignored — it's the UI string "Experience Level".)
+  function experienceLevel(j) {
+    if (j.tierText) return j.tierText;
+    const t = j.contractorTier;
+    if (!t) return '';
+    return String(t).toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
+  }
+
   function normJob(j) {
     j = j || {};
     const hb = j.hourlyBudget || {};
     const skills = [];
     (j.skills || []).forEach((s) => { const n = s.prefLabel || s.prettyName || s.name; if (n) skills.push(n); });
     (j.attrs || []).forEach((s) => { const n = s.prefLabel || s.prettyName; if (n && skills.indexOf(n) < 0) skills.push(n); });
+    const tags = [];
+    const annTags = (j.annotations && j.annotations.tags) || [];
+    if (Array.isArray(annTags)) annTags.forEach((t) => { if (t) tags.push(String(t)); });
+    const prefLoc = Array.isArray(j.prefFreelancerLocation) ? j.prefFreelancerLocation.map(String) : [];
     const client = j.client || j.buyer || {};
     return {
       id: j.ciphertext || j.uid || '',
       uid: String(j.uid || ''),
+      recno: String(j.recno || ''),
       url: jobURL(j.ciphertext),
       title: j.title || '',
       description: j.description || '',
@@ -63,17 +88,24 @@
       weeklyBudget: toNum(j.weeklyBudget),
       engagement: j.engagement || '',
       duration: j.durationLabel || j.duration || '',
-      experienceLevel: j.tierText || j.tierLabel || '',
+      experienceLevel: experienceLevel(j),
       freelancersToHire: toInt(j.freelancersToHire),
       proposalsTier: j.proposalsTier || '',
+      totalApplicants: toInt(j.totalApplicants),
       premium: !!j.premium,
       applied: !!j.isApplied,
       enterprise: !!j.enterpriseJob,
+      jobStatus: j.jobStatus || '',
+      isLocal: !!j.isLocal,
+      prefFreelancerLocation: prefLoc,
+      prefFreelancerLocationMandatory: !!j.prefFreelancerLocationMandatory,
       createdOn: j.createdOn || '',
       publishedOn: j.publishedOn || '',
       renewedOn: j.renewedOn || '',
       connectPrice: toInt(j.connectPrice),
+      position: toInt(j.position),
       skills: skills,
+      tags: tags,
       client: normClient(client),
     };
   }

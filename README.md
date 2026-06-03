@@ -22,8 +22,15 @@ Fast, cheap, and easy to automate.
 ## What it exports
 
 Every job comes out as structured data: title, description, budget
-(hourly/fixed), skills, posted/renewed dates, proposals, connects, and the client
-(country, payment-verified, total spent, hires, rating, and more).
+(hourly/fixed), skills, tags, experience level, posted/renewed dates, proposals
+(tier **and** exact applicant count where available), connects, job status,
+preferred freelancer location, and the client (country, payment-verified, total
+spent, hires, jobs posted, rating, last recruiting activity, and more).
+
+> **What's *not* available:** the client's **average hourly rate** and **total
+> hours billed** are not in any feed payload — Upwork only shows them on the
+> single job page, which sits behind a Cloudflare bot wall the automated browser
+> can't pass. So those two fields can't be exported.
 
 It can export any of your Find Work feeds:
 
@@ -130,6 +137,7 @@ folder.
 | `--hold` | off | do the action, then keep the window open until Ctrl+C (manual poking) |
 | `--timeout` | `90s` | how long to wait for a page to load |
 | `--dry-run` | off | print the URL(s) it would visit and exit (doesn't open the browser) |
+| `--raw` | off | dump the untouched client/job payload from the page as JSON and exit (diagnostic; needs a single feed/job, no export) |
 | `--profile` | app data dir | where the saved login/profile is kept |
 | `--chrome` | system Chrome | path to a specific Chrome binary |
 

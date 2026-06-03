@@ -16,6 +16,24 @@ import (
 //go:embed extract.js
 var extractJS string
 
+//go:embed raw.js
+var rawJS string
+
+// RunRaw evaluates the diagnostic raw dumper (the --raw flag) in the page's main
+// world and returns its pretty-printed JSON: the untouched client/buyer
+// object(s) Upwork ships, so we can see every field before normalizing.
+func RunRaw(page *rod.Page) (string, error) {
+	obj, err := page.Eval(rawJS)
+	if err != nil {
+		return "", fmt.Errorf("evaluate raw dumper: %w", err)
+	}
+	raw := obj.Value.Str()
+	if raw == "" {
+		return "", fmt.Errorf("raw dumper returned empty result")
+	}
+	return raw, nil
+}
+
 // Run evaluates the extractor in the page's main world and parses the result.
 func Run(page *rod.Page) (*model.Result, error) {
 	obj, err := page.Eval(extractJS)
