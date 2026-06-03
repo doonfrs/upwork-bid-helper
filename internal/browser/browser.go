@@ -93,6 +93,11 @@ func Launch(opts Options) (*Browser, error) {
 		return nil, fmt.Errorf("launch chrome: %w (is Chrome installed? profile in use by another window?)", err)
 	}
 
+	// Record the Chrome PID so a later run can reap us if we don't shut down
+	// cleanly. This is the cross-platform self-heal signal: Windows Chrome never
+	// writes the POSIX SingletonLock symlink, so we cannot rely on it there.
+	writeOwnerPID(profile, l.PID())
+
 	b := rod.New().ControlURL(controlURL)
 	if err := b.Connect(); err != nil {
 		l.Kill()
@@ -125,6 +130,11 @@ func (b *Browser) Close() {
 	}
 	if b.launcher != nil {
 		b.launcher.Kill()
+	}
+	// Clean shutdown: drop the owner PID so the next run doesn't try to reap a
+	// dead (possibly recycled) PID.
+	if b.profileDir != "" {
+		_ = os.Remove(ownerPIDFile(b.profileDir))
 	}
 }
 
@@ -204,25 +214,48 @@ func cookiesToParams(cs []*proto.NetworkCookie) []*proto.NetworkCookieParam {
 // DefaultStateFile returns the cookie state file path for the default profile.
 func DefaultStateFile() string { return DefaultProfileDir() + ".cookies.json" }
 
+// ownerPIDFile is where we record the launched Chrome's PID, so a later run can
+// reap it if this one dies without a clean Close.
+func ownerPIDFile(profile string) string { return filepath.Join(profile, ".ubh-chrome.pid") }
+
+// writeOwnerPID records the launched Chrome PID under the profile. Best effort:
+// a failure only means a future crash won't be auto-reaped.
+func writeOwnerPID(profile string, pid int) {
+	if pid > 0 {
+		_ = os.WriteFile(ownerPIDFile(profile), []byte(strconv.Itoa(pid)), 0o644)
+	}
+}
+
 // reapStaleProfile kills a leftover Chrome that still holds our app-owned
 // profile (from a prior run that didn't exit cleanly) and removes the Singleton
 // lock files, so a fresh launch can proceed. Safe because the profile is
 // dedicated to this tool: any Chrome bound to it is one of ours.
 func reapStaleProfile(profile string) {
-	if pid := singletonOwnerPID(profile); pid > 0 && chromeOwnsProfile(pid, profile) {
+	if pid := ownerPID(profile); pid > 0 && chromeOwnsProfile(pid, profile) {
 		if p, err := os.FindProcess(pid); err == nil {
 			_ = p.Kill()
 			time.Sleep(250 * time.Millisecond) // let children exit and release the socket
 		}
 	}
+	_ = os.Remove(ownerPIDFile(profile))
 	for _, name := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
 		_ = os.Remove(filepath.Join(profile, name))
 	}
 }
 
-// singletonOwnerPID parses the PID from the profile's SingletonLock symlink
-// (target form "<hostname>-<pid>"). Returns 0 if absent/unreadable.
-func singletonOwnerPID(profile string) int {
+// ownerPID returns the PID of the Chrome that last claimed this profile. It
+// prefers the PID file we write on launch (the only signal available on
+// Windows, where Chrome writes no SingletonLock), falling back to the POSIX
+// SingletonLock symlink for a Chrome we didn't launch. Returns 0 if neither
+// is present/readable.
+func ownerPID(profile string) int {
+	if data, err := os.ReadFile(ownerPIDFile(profile)); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			return pid
+		}
+	}
+	// Fallback: parse the PID from the SingletonLock symlink (target form
+	// "<hostname>-<pid>"). POSIX only; absent on Windows.
 	target, err := os.Readlink(filepath.Join(profile, "SingletonLock"))
 	if err != nil {
 		return 0
