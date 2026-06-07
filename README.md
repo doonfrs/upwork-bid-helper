@@ -241,6 +241,45 @@ Use `--attach-port` if you ran Chrome on a port other than `9222`.
 > (`--pages` / "Load More" applies to feeds, not search — search exports the first
 > page of results.)
 
+> **Sign-in matters for search.** Upwork only returns client stats (payment-verified,
+> total spent, reviews) and honors logged-in-only filters like `payment_verified=1`
+> when the attach Chrome is **signed in**; logged out, it silently downgrades, stripping
+> those filters and returning generic jobs with empty client fields. To prevent that,
+> `--attach` now **checks login before fetching**: if you're signed out it opens the
+> login page in your Chrome window and waits for you to sign in (see `--login-timeout`),
+> then continues. So if a search export shows *every* client as unverified, your attach
+> Chrome is logged out: sign in when it prompts (a quick manual check: `--attach recent`
+> printing "login
+> required" means you're logged out).
+
+### 7. Batch many targets with a list file (`--list`)
+
+Running several searches/feeds one command at a time is tedious, and putting URLs in a
+`.bat`/shell script means escaping every `%` and `&`. Instead, put your targets in a
+plain text file and let the tool read them verbatim:
+
+```
+# urls.txt — one entry per line: <name>  <target>
+#   <name>   -> output file <name>.json (next to this file)
+#   <target> -> "all", a feed shortcut (myfeed|best|recent|saved), or a full Upwork URL
+private    all
+laravel    https://www.upwork.com/nx/search/jobs/?q=laravel&payment_verified=1&t=0,1&per_page=50
+small_php  https://www.upwork.com/nx/search/jobs/?q=php AND NOT wordpress&payment_verified=1&t=1
+```
+
+```sh
+upwork-feed-fetcher --list urls.txt --attach
+```
+
+The tool fetches every entry **through one browser session** and writes `private.json`,
+`laravel.json`, `small_php.json` next to `urls.txt`. URLs are taken exactly as written —
+spaces, `&`, `%`, `=` need no escaping (no more `%%2B`). One failing entry is logged and
+skipped; the rest still run. `--format` and `--pages` apply to every entry; `--dry-run`
+lists the resolved targets without opening a browser.
+
+See [output/fetch.bat](output/fetch.bat) for a ready-made wrapper that starts the
+debug Chrome (if needed) and runs `--list urls.txt --attach` on a schedule.
+
 ### Choosing the output
 
 ```sh
@@ -259,9 +298,13 @@ folder.
 | `--output` / `--out` | auto | output file (or name prefix when multiple formats) |
 | `--format` | `json` | `json`, `csv`, `xml`, `all`, or a comma list like `json,csv` |
 | `--pages` | `1` | pages to load per feed (clicks "Load More" `pages−1` times) |
+| `--list` | off | batch mode: fetch every entry in a text file (`<name> <url\|feed\|all>` per line) in one browser session, writing `<name>.json` next to the file. URLs are read verbatim — no escaping (see section 7) |
 | `--attach` | off | attach to **your own** running Chrome (debug port) instead of launching one — the way to reach search & single‑job pages past Cloudflare (see section 6) |
 | `--attach-port` | `9222` | debug endpoint for `--attach` (e.g. `9222`, `:9222`, `host:9222`, or a full `ws://…` URL) |
 | `--current` | off | with `--attach`: read the Upwork tab you already have open instead of navigating (most reliable past Cloudflare) |
+| `--ensure-login` | `on` | verify a signed-in session before exporting so a logged-out run never writes fake/downgraded results (logged-out search returns a public list with empty client fields). `--attach`/`--gui` halt for sign-in; headless refuses to export. `--ensure-login=0` skips the check |
+| `--login-timeout` | `0` | with `--attach` or `--gui`: if you're not signed in, open the login page and wait this long for you to sign in (`0` = wait forever; Ctrl+C cancels) |
+| `--delay` | `3s` | settle pause before reading each page — lets it finish loading and paces visits so Upwork is less likely to log you out for rapid requests |
 | `--gui` | off | show the browser window (handy to watch a run) |
 | `--hold` | off | do the action, then keep the window open until Ctrl+C (manual poking) |
 | `--timeout` | `90s` | how long to wait for a page to load |

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-rod/rod"
 
@@ -69,6 +70,10 @@ func run() error {
 		attach     = flag.Bool("attach", false, "attach to your already-running Chrome (via its debug port) instead of launching one, so your real Cloudflare-cleared session is used; start Chrome with --remote-debugging-port and a dedicated --user-data-dir first")
 		attachPort = flag.String("attach-port", "9222", "debug endpoint for --attach (e.g. 9222, :9222, host:9222)")
 		current    = flag.Bool("current", false, "with --attach: read the Upwork tab you already have open instead of navigating (most reliable; you do the Cloudflare-facing navigation)")
+		list       = flag.String("list", "", "batch mode: fetch every entry in a text file (one `<name> <url|feed|all>` per line) through a single browser session, writing <name>.<ext> next to the list file. URLs are read verbatim (no shell/.bat escaping)")
+		ensureLgn  = flag.Bool("ensure-login", true, "verify a signed-in Upwork session before exporting so a logged-out run never writes fake/downgraded results; --attach/--gui halt for sign-in, headless refuses to export. --ensure-login=0 to skip")
+		loginWait  = flag.Duration("login-timeout", 0, "with --attach or --gui: if not signed in, open the login page and wait this long for you to sign in (0 = wait indefinitely; Ctrl+C to cancel)")
+		delay      = flag.Duration("delay", 10*time.Second, "settle delay before reading each page: lets the page finish and paces visits so Upwork is less likely to log you out for rapid-fire requests")
 	)
 	// Go's flag package stops at the first non-flag arg, so `recent --gui` would
 	// treat --gui as a positional. Loop the parse to allow flags and the
@@ -111,6 +116,55 @@ func run() error {
 	// --current only makes sense when attached to your own Chrome.
 	if *current && !*attach {
 		return fmt.Errorf("--current requires --attach (it reads a tab from your already-running Chrome)")
+	}
+
+	// --list batch mode: fetch many targets from a file in one browser session.
+	// It ignores the positional arg, --output, --current and --raw (each entry's
+	// output name comes from the file). --format and --pages apply to every entry.
+	if *list != "" {
+		entries, perr := parseList(*list)
+		if perr != nil {
+			return perr
+		}
+		formats, ferr := parseFormats(*format)
+		if ferr != nil {
+			return ferr
+		}
+		if *dryRun {
+			for _, e := range entries {
+				t := e.target
+				if !strings.EqualFold(t, "all") {
+					if rt, rerr := resolveTarget([]string{t}); rerr == nil {
+						t = rt
+					}
+				}
+				fmt.Printf("%s\t%s\n", e.name, t)
+			}
+			return nil
+		}
+		b, lerr := browser.Launch(browser.Options{
+			ProfileDir: *profile,
+			ChromePath: *chromePath,
+			Headless:   !*gui && !*attach,
+			Attach:     *attach,
+			AttachPort: *attachPort,
+		})
+		if lerr != nil {
+			return lerr
+		}
+		defer b.Close()
+		closeOnInterrupt(b)
+		if *ensureLgn {
+			canHalt := *attach || *gui
+			wait := *timeout
+			if canHalt {
+				wait = *loginWait
+			}
+			if err := ensureLogin(b, canHalt, wait); err != nil {
+				return err
+			}
+		}
+		return runList(entries, b, *list, formats, *delay, *timeout, pageCount, *attach)
 	}
 
 	// --hold with no target defaults to the find-work home so you have a page to
@@ -180,6 +234,21 @@ func run() error {
 	defer b.Close()
 	closeOnInterrupt(b)
 
+	// Verify a signed-in session before fetching so a logged-out run never writes
+	// fake/downgraded results. --attach/--gui halt for an interactive sign-in;
+	// headless refuses to export. Skipped for --raw/--hold (diagnostic / no export)
+	// and file:// targets (offline). --ensure-login=0 disables it.
+	if *ensureLgn && !*raw && !*hold && !strings.HasPrefix(target, "file://") {
+		canHalt := *attach || *gui
+		wait := *timeout
+		if canHalt {
+			wait = *loginWait
+		}
+		if err := ensureLogin(b, canHalt, wait); err != nil {
+			return err
+		}
+	}
+
 	// --current reads a tab the human already opened; otherwise open a fresh page.
 	var page *rod.Page
 	if *current {
@@ -212,19 +281,19 @@ func run() error {
 				return fmt.Errorf("navigate: %w", nerr)
 			}
 		}
-		return dumpRaw(page, *timeout)
+		return dumpRaw(page, *delay, *timeout)
 	}
 
 	var res *model.Result
 	switch {
 	case allMode:
-		res, err = exportAll(b, page, *timeout, pageCount)
+		res, err = exportAll(b, page, *delay, *timeout, pageCount)
 	case *current:
 		// The human already navigated this tab past Cloudflare; just read it.
 		if info, ierr := page.Info(); ierr == nil {
 			fmt.Fprintf(os.Stderr, "reading open tab: %s\n", info.URL)
 		}
-		res, err = waitAndExtract(b, page, *timeout, pageCount)
+		res, err = waitAndExtract(b, page, *delay, *timeout, pageCount)
 	default:
 		fmt.Fprintf(os.Stderr, "target: %s\n", target)
 		if nerr := page.Navigate(target); nerr != nil {
@@ -234,7 +303,7 @@ func run() error {
 		if *hold {
 			holdOpen()
 		}
-		res, err = waitAndExtract(b, page, *timeout, pageCount)
+		res, err = waitAndExtract(b, page, *delay, *timeout, pageCount)
 	}
 	if err != nil {
 		return err
@@ -322,6 +391,63 @@ func runLogin(profile, chromePath string, timeout time.Duration, hold bool) erro
 	return fmt.Errorf("timed out after %s. If you did sign in, your session is likely already saved — just re-run a command; otherwise run `login` again", timeout)
 }
 
+// errNotSignedIn aborts a run (before any output) because we couldn't confirm a
+// signed-in Upwork session and won't risk exporting downgraded/fake data.
+var errNotSignedIn = errors.New("not signed in - refusing to export to avoid fake/incomplete results (a logged-out session returns a public, downgraded list, especially for search). Sign in with `upwork-feed-fetcher login`, or use --attach/--gui to sign in interactively, or pass --ensure-login=0 to skip this check")
+
+// ensureLogin verifies a signed-in Upwork session before we fetch, so a logged-out
+// run never emits fake/downgraded results. It probes an auth-gated FEED (loginURL),
+// not the target: a logged-out search returns a normal-looking public list with no
+// login redirect, so login state is only reliable from a feed (which bounces to the
+// login page when logged out).
+//
+// halt=true (a visible window: --attach/--gui) opens the login page and waits for the
+// user to sign in - indefinitely when wait<=0, else bounded by wait; Ctrl+C aborts.
+// halt=false (headless) cannot sign in interactively, so it refuses (errNotSignedIn)
+// the moment it sees the login page, or after `wait` if it never confirms sign-in.
+func ensureLogin(b *browser.Browser, halt bool, wait time.Duration) error {
+	page, err := b.NewPage()
+	if err != nil {
+		return err
+	}
+	defer page.Close() // close the transient check tab; never closes the browser
+	if err := page.Navigate(loginURL); err != nil {
+		return fmt.Errorf("navigate: %w", err)
+	}
+
+	deadline := time.Now().Add(wait)
+	var prompted, notedCaptcha bool
+	for (halt && wait <= 0) || time.Now().Before(deadline) {
+		switch browser.AuthState(page) {
+		case browser.AuthIn:
+			if prompted {
+				fmt.Fprintln(os.Stderr, "✓ Signed in - continuing.")
+				_ = b.SaveState() // persist a freshly-signed-in session (no-op when attached)
+			}
+			return nil
+		case browser.AuthLogin:
+			if !halt {
+				return errNotSignedIn // headless: logged out for sure, don't fake
+			}
+			if !prompted {
+				fmt.Fprintln(os.Stderr, "Not signed in. I opened the Upwork login in the browser window -")
+				fmt.Fprintln(os.Stderr, "→ please sign in there; I'll continue automatically once you're in. (Ctrl+C to cancel.)")
+				prompted = true
+			}
+		case browser.AuthCaptcha:
+			if halt && !notedCaptcha {
+				fmt.Fprintln(os.Stderr, "  …a challenge is showing - please solve it in the window.")
+				notedCaptcha = true
+			}
+		}
+		time.Sleep(1500 * time.Millisecond)
+	}
+	if halt {
+		return fmt.Errorf("timed out after %s waiting for you to sign in (use --login-timeout 0 to wait indefinitely, or --ensure-login=0 to skip)", wait)
+	}
+	return errNotSignedIn // headless: never confirmed a session, don't risk fake data
+}
+
 // resolveTarget returns the URL to visit: a full URL or a known page shortcut
 // (myfeed, best, recent, saved).
 func resolveTarget(args []string) (string, error) {
@@ -358,6 +484,115 @@ func currentUpworkPage(b *browser.Browser) (*rod.Page, error) {
 	return nil, fmt.Errorf("no open Upwork tab found — open the feed or job page in your Chrome, then re-run with --attach --current")
 }
 
+// listEntry is one line of a --list file: an output base name and a target.
+type listEntry struct {
+	name   string // output base name -> <name>.<ext>
+	target string // "all", a feed shortcut, or a full URL (taken verbatim)
+}
+
+// parseList reads a --list file. Each non-blank, non-"#" line is
+// "<name> <target>", split on the first run of whitespace; the target is the
+// remainder verbatim, so URLs may contain spaces, '&', '%' and '=' with no
+// shell/.bat escaping. Names must be unique and usable as filenames.
+func parseList(path string) ([]listEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read list %s: %w", path, err)
+	}
+	var entries []listEntry
+	seen := map[string]bool{}
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.IndexFunc(line, unicode.IsSpace)
+		if idx < 0 {
+			return nil, fmt.Errorf("list line %d: %q needs a name and a target, e.g. `recent recent` or `php <url>`", i+1, line)
+		}
+		name := line[:idx]
+		target := strings.TrimSpace(line[idx:])
+		if target == "" {
+			return nil, fmt.Errorf("list line %d: %q has a name but no target", i+1, line)
+		}
+		if strings.ContainsAny(name, `/\:*?"<>|`) {
+			return nil, fmt.Errorf("list line %d: name %q is not a valid filename", i+1, name)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("list line %d: duplicate name %q (its output would overwrite an earlier one)", i+1, name)
+		}
+		seen[name] = true
+		entries = append(entries, listEntry{name: name, target: target})
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no entries in %s (expected `<name> <url|feed|all>` per line)", path)
+	}
+	return entries, nil
+}
+
+// runList fetches every entry through the single browser b, writing
+// <name>.<ext> into the directory of the list file. A failing entry is logged
+// and skipped; the run still returns an error if any entry failed.
+func runList(entries []listEntry, b *browser.Browser, listPath string, formats []export.Format, settle, timeout time.Duration, pages int, attach bool) error {
+	outDir := filepath.Dir(listPath)
+	var failed int
+	for _, e := range entries {
+		fmt.Fprintf(os.Stderr, "\n=== %s -> %s ===\n", e.name, e.target)
+		res, err := fetchOne(b, e.target, settle, timeout, pages, attach)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %s FAILED: %v\n", e.name, err)
+			failed++
+			continue
+		}
+		if !res.Exportable() {
+			fmt.Fprintf(os.Stderr, "  %s: nothing to export (pageType %q, %d jobs)\n", e.name, res.PageType, res.Count)
+			failed++
+			continue
+		}
+		written, werr := writeOutputs(res, formats, filepath.Join(outDir, e.name))
+		if werr != nil {
+			fmt.Fprintf(os.Stderr, "  %s write failed: %v\n", e.name, werr)
+			failed++
+			continue
+		}
+		for _, p := range written {
+			fmt.Fprintf(os.Stderr, "  wrote %s (%d jobs)\n", p, count(res))
+		}
+	}
+	// Refresh the saved session (no-op when attached).
+	if err := b.SaveState(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d list entries failed", failed, len(entries))
+	}
+	return nil
+}
+
+// fetchOne resolves and extracts a single --list target on a fresh tab of the
+// shared browser b. In attach mode the tab is closed afterwards so repeated
+// entries don't pile up tabs in the user's Chrome.
+func fetchOne(b *browser.Browser, target string, settle, timeout time.Duration, pages int, attach bool) (*model.Result, error) {
+	page, err := b.NewPage()
+	if err != nil {
+		return nil, err
+	}
+	if attach {
+		defer page.Close()
+	}
+	if strings.EqualFold(target, "all") {
+		return exportAll(b, page, settle, timeout, pages)
+	}
+	url, err := resolveTarget([]string{target})
+	if err != nil {
+		return nil, err
+	}
+	if err := page.Navigate(url); err != nil {
+		return nil, fmt.Errorf("navigate %s: %w", url, err)
+	}
+	return waitAndExtract(b, page, settle, timeout, pages)
+}
+
 // allFeeds are the find-work feeds the `all` command sweeps and merges. Saved
 // Jobs is intentionally excluded — it's a personal bookmark list, not a source
 // of new jobs to bid on.
@@ -370,7 +605,7 @@ var allFeeds = []struct{ name, url string }{
 // exportAll visits each find-work feed in turn and merges their jobs into one
 // result, deduplicating by job ID (falling back to UID). A login/challenge wall
 // on any feed aborts the run, since it means the session needs refreshing.
-func exportAll(b *browser.Browser, page *rod.Page, timeout time.Duration, pages int) (*model.Result, error) {
+func exportAll(b *browser.Browser, page *rod.Page, settle, timeout time.Duration, pages int) (*model.Result, error) {
 	combined := &model.Result{PageType: model.PageAll}
 	seen := map[string]bool{}
 	for _, f := range allFeeds {
@@ -378,7 +613,7 @@ func exportAll(b *browser.Browser, page *rod.Page, timeout time.Duration, pages 
 		if err := page.Navigate(f.url); err != nil {
 			return nil, fmt.Errorf("navigate %s: %w", f.name, err)
 		}
-		res, err := waitAndExtract(b, page, timeout, pages)
+		res, err := waitAndExtract(b, page, settle, timeout, pages)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f.name, err)
 		}
@@ -407,7 +642,10 @@ func exportAll(b *browser.Browser, page *rod.Page, timeout time.Duration, pages 
 // dumpRaw waits for the (already-navigated) page to be ready, then prints the
 // raw client/buyer payload from the in-page diagnostic dumper to stdout. Used by
 // --raw to inspect exactly which fields Upwork ships before we normalize them.
-func dumpRaw(page *rod.Page, timeout time.Duration) error {
+func dumpRaw(page *rod.Page, settle, timeout time.Duration) error {
+	if settle > 0 {
+		time.Sleep(settle)
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		switch browser.Probe(page) {
@@ -437,10 +675,14 @@ func dumpRaw(page *rod.Page, timeout time.Duration) error {
 var errLoginRequired = errors.New("login required, run: upwork-feed-fetcher login")
 
 // waitAndExtract polls until the (hidden) page is ready, then runs the
-// extractor. If pages > 1, it clicks "Load More Jobs" to pull additional pages
-// before the final extraction. If Upwork shows login/CAPTCHA, it returns
-// errLoginRequired.
-func waitAndExtract(b *browser.Browser, page *rod.Page, timeout time.Duration, pages int) (*model.Result, error) {
+// extractor. settle is an initial pause before reading, to let the page finish
+// and to pace visits (avoid rapid-fire requests). If pages > 1, it clicks "Load
+// More Jobs" to pull additional pages before the final extraction. If Upwork
+// shows login/CAPTCHA, it returns errLoginRequired.
+func waitAndExtract(b *browser.Browser, page *rod.Page, settle, timeout time.Duration, pages int) (*model.Result, error) {
+	if settle > 0 {
+		time.Sleep(settle)
+	}
 	deadline := time.Now().Add(timeout)
 	var readyEmptyAt time.Time // first time we saw a ready page with no jobs
 	for time.Now().Before(deadline) {
