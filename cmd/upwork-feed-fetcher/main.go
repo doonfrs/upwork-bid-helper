@@ -157,6 +157,13 @@ func run() error {
 		return nil
 	}
 
+	// Search sits behind Cloudflare for the default (self-launching) browser; it
+	// only loads through your own session. Nudge toward --attach before we waste a
+	// run hitting the challenge wall.
+	if !*attach && extract.Classify(target) == model.PageSearch {
+		fmt.Fprintln(os.Stderr, "note: search pages are Cloudflare-blocked for the default browser — use --attach with your own Chrome (see README §6). Trying anyway…")
+	}
+
 	// Exports run headless (background, no window) by default; --gui shows the
 	// window. --hold always runs visibly so you can interact. --attach connects to
 	// your own running Chrome (headless is irrelevant — it's already on screen).
@@ -182,6 +189,13 @@ func run() error {
 	}
 	if err != nil {
 		return err
+	}
+	// In attach mode we opened a fresh tab in the user's Chrome (the --current
+	// path instead reads an existing tab, which we must leave alone). Close just
+	// that tab when we're done so a recurring run doesn't pile up tabs. This never
+	// closes the browser itself (Browser.Close is a no-op for an attached Chrome).
+	if *attach && !*current {
+		defer page.Close()
 	}
 
 	// --raw: diagnostic dump of the untouched client/buyer payload, then exit.
@@ -454,13 +468,20 @@ func waitAndExtract(b *browser.Browser, page *rod.Page, timeout time.Duration, p
 			if res.PageType == model.PageUnknown {
 				return res, nil
 			}
-			// Ready but no jobs: this is a genuinely empty feed (e.g. no saved
-			// jobs), not a still-loading one. Give a brief grace for late jobs to
-			// appear, then accept the empty result instead of waiting out the
-			// full timeout.
+			// Ready but no jobs. For a feed this is a genuinely empty list (e.g. no
+			// saved jobs), so a brief grace then accept. Search is different: the
+			// page is "ready" (window.__NUXT__ present) before the results request
+			// resolves, so 0 jobs usually means "still loading" — wait much longer
+			// for the data to arrive. The loop re-extracts every second and returns
+			// via Exportable() the instant jobs appear; this grace only bounds the
+			// genuine no-results case. Overall still capped by --timeout.
+			emptyGrace := 3 * time.Second
+			if res.PageType == model.PageSearch {
+				emptyGrace = 20 * time.Second
+			}
 			if readyEmptyAt.IsZero() {
 				readyEmptyAt = time.Now()
-			} else if time.Since(readyEmptyAt) >= 3*time.Second {
+			} else if time.Since(readyEmptyAt) >= emptyGrace {
 				return res, nil
 			}
 		}

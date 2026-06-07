@@ -40,11 +40,13 @@ func Alias(name string) (string, bool) {
 }
 
 // Resolve turns CLI args into a target URL:
-//   - a single full URL (http/https/file) is used as-is
+//   - a single full URL (http/https/file) is used as-is — this includes a full
+//     Upwork search URL (e.g. /nx/search/jobs/?q=…), which exports fine via
+//     --attach (your own Chrome clears Cloudflare; the default browser can't)
 //   - a single known shortcut (myfeed, best, recent, saved) expands to its URL
 //
-// Anything else is unsupported (keyword search is blocked by Upwork's bot
-// challenge, so it is not built here).
+// We deliberately do not synthesize a search URL from bare keywords — provide the
+// full search URL yourself.
 func Resolve(args []string) (string, error) {
 	if len(args) == 1 {
 		if IsURL(args[0]) {

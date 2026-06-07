@@ -234,6 +234,13 @@ upwork-feed-fetcher --attach --current
 If no debug Chrome is running, `--attach` prints the exact command to start one.
 Use `--attach-port` if you ran Chrome on a port other than `9222`.
 
+> **Search loads asynchronously.** When the tool navigates to a search URL it waits
+> for the results to arrive before dumping. If a tool-initiated search ever gets
+> re-challenged, open the search in your Chrome window yourself and use
+> `--attach --current` — the results are already there, so it reads them instantly.
+> (`--pages` / "Load More" applies to feeds, not search — search exports the first
+> page of results.)
+
 ### Choosing the output
 
 ```sh
